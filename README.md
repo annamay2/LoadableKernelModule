@@ -9,13 +9,14 @@
 Load the module--
 sudo insmod my_driver.ko
 
-Creatw a device file:
+Create a device file--
 sudo mknod /dev/my_char_device c <major_number> 0
 (the major number is 240)
 
 sudo chmod 666 /dev/my_char_device
 
-runnthe userspace application: ./user_app
+runnthe userspace application--
+./user_app
 
-unload the module when your done:
+unload the module when your done--
 sudo rmmod my_driver
