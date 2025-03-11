@@ -23,11 +23,12 @@ int main() {
             perror("Read failed");
             break;
         } else if (bytes_read == 0) {
-            printf("No new data, retrying...\n");
-            usleep(500000); // Sleep for 500ms to prevent 100% CPU usage
-            continue;
+            // No data available, but read should block unless the device is non-blocking
+            printf("No data available, but read returned 0. Is the device non-blocking?\n");
+            break;
         }
 
+        // Null-terminate the buffer and print the mouse event
         buffer[bytes_read] = '\0';
         printf("Mouse Event: %s", buffer);
     }

@@ -4,6 +4,8 @@
 #include <linux/input.h>
 #include <linux/cdev.h>
 #include <linux/device.h>
+#include <linux/sched.h>  // For wait queues
+#include <linux/wait.h>   // For wait queues
 
 #define DEVICE_NAME "mouse_logger_1"
 #define BUFFER_SIZE 256
@@ -17,11 +19,17 @@ static char event_buffer[BUFFER_SIZE];
 static int buffer_pos = 0;
 static DEFINE_MUTEX(buffer_lock);
 
+// Wait queue for blocking read
+static DECLARE_WAIT_QUEUE_HEAD(mouse_wait_queue);
+static int data_available = 0; // Flag to indicate new data
+
 // Write event to buffer
 static void log_event(const char *event) {
     mutex_lock(&buffer_lock);
     if (buffer_pos + strlen(event) + 2 < BUFFER_SIZE) { // +2 for newline and null terminator
         buffer_pos += snprintf(event_buffer + buffer_pos, BUFFER_SIZE - buffer_pos, "%s\n", event);
+        data_available = 1; // Set flag to indicate new data
+        wake_up_interruptible(&mouse_wait_queue); // Wake up waiting processes
     } else {
         printk(KERN_WARNING "Mouse Logger: Buffer full, discarding event: %s\n", event);
     }
@@ -30,23 +38,40 @@ static void log_event(const char *event) {
     printk(KERN_INFO "Mouse Logger: Logged event - %s\n", event);
 }
 
-
 static ssize_t mouse_read(struct file *file, char __user *user_buffer, size_t len, loff_t *offset) {
-    if (*offset >= buffer_pos) return 0; // No new data
-
     mutex_lock(&buffer_lock);
+
+    // Block until data is available
+    while (buffer_pos == 0) {
+        mutex_unlock(&buffer_lock);
+
+        if (file->f_flags & O_NONBLOCK) {
+            return -EAGAIN; // Non-blocking mode, return immediately
+        }
+
+        if (wait_event_interruptible(mouse_wait_queue, data_available)) {
+            return -ERESTARTSYS; // Interrupted by signal
+        }
+
+        mutex_lock(&buffer_lock);
+    }
+
+    // Copy data to user space
     size_t bytes_to_copy = min(len, (size_t)buffer_pos);
     if (copy_to_user(user_buffer, event_buffer, bytes_to_copy)) {
         mutex_unlock(&buffer_lock);
         return -EFAULT;
     }
-    *offset += bytes_to_copy;
+
+    // Update buffer and offset
     buffer_pos = 0; // Reset buffer after reading
+    data_available = 0; // Reset data available flag
+    *offset += bytes_to_copy;
+
     mutex_unlock(&buffer_lock);
 
     return bytes_to_copy;
 }
-
 
 // Open function (not much needed here)
 static int mouse_open(struct inode *inode, struct file *file) {
@@ -68,9 +93,9 @@ static struct file_operations fops = {
 
 // Mouse event callback
 static void mouse_event(struct input_handle *handle, unsigned int type, unsigned int code, int value) {
-printk(KERN_INFO "Mouse Logger: Received event - type: %u, code: %u, value: %d\n", type, code, value);
+    printk(KERN_INFO "Mouse Logger: Received event - type: %u, code: %u, value: %d\n", type, code, value);
 
-if (type == EV_KEY && value) {
+    if (type == EV_KEY && value) {
         if (code == BTN_LEFT) log_event("Left Click");
         else if (code == BTN_RIGHT) log_event("Right Click");
         else if (code == BTN_MIDDLE) log_event("Middle Click");
@@ -117,8 +142,8 @@ static int mouse_connect(struct input_handler *handler, struct input_dev *dev, c
 }
 
 static void mouse_disconnect(struct input_handle *handle) {
-printk(KERN_INFO "Mouse Logger: Device disconnected: %s\n", handle->dev->name);    
-input_close_device(handle);
+    printk(KERN_INFO "Mouse Logger: Device disconnected: %s\n", handle->dev->name);
+    input_close_device(handle);
     input_unregister_handle(handle);
     kfree(handle);
 }
@@ -137,7 +162,7 @@ static struct input_handler mouse_handler = {
     .connect    = mouse_connect,
     .disconnect = mouse_disconnect,
     .name       = "mouse_logger_handler",
-    .id_table   = mouse_ids, // Fix: If NULL, the driver will match all devices.
+    .id_table   = mouse_ids,
 };
 
 // Module initialization
@@ -156,9 +181,9 @@ static int __init mouse_init(void) {
     mouse_class = class_create(DEVICE_NAME);
 
     if (IS_ERR(mouse_class)) {
-            unregister_chrdev_region(dev, 1);
-            return PTR_ERR(mouse_class);
-        }
+        unregister_chrdev_region(dev, 1);
+        return PTR_ERR(mouse_class);
+    }
 
     device_create(mouse_class, NULL, dev, NULL, DEVICE_NAME);
 
