@@ -2,8 +2,10 @@
 #include <fcntl.h>
 #include <unistd.h>
 #include <errno.h>
+#include <sys/ioctl.h>
 
 #define DEVICE_FILE "/dev/mouse_logger_1"
+#define MOUSE_LOGGER_CLEAR _IO('M', 1)
 
 int main() {
     char buffer[256];
@@ -11,6 +13,13 @@ int main() {
 
     if (fd < 0) {
         perror("Failed to open device file");
+        return 1;
+    }
+
+    // Clear the buffer when the application starts
+    if (ioctl(fd, MOUSE_LOGGER_CLEAR) < 0) {
+        perror("Failed to clear buffer");
+        close(fd);
         return 1;
     }
 

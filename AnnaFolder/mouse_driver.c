@@ -6,9 +6,13 @@
 #include <linux/device.h>
 #include <linux/sched.h>  // For wait queues
 #include <linux/wait.h>   // For wait queues
+#include <linux/ioctl.h>  // For ioctl support
 
 #define DEVICE_NAME "mouse_logger_1"
 #define BUFFER_SIZE 256
+
+// Define ioctl command
+#define MOUSE_LOGGER_CLEAR _IO('M', 1)
 
 static int major_number;
 static struct cdev mouse_cdev;
@@ -36,6 +40,15 @@ static void log_event(const char *event) {
     mutex_unlock(&buffer_lock);
 
     printk(KERN_INFO "Mouse Logger: Logged event - %s\n", event);
+}
+
+// Clear the buffer
+static void clear_buffer(void) {
+    mutex_lock(&buffer_lock);
+    buffer_pos = 0; // Reset buffer position
+    data_available = 0; // Reset data available flag
+    mutex_unlock(&buffer_lock);
+    printk(KERN_INFO "Mouse Logger: Buffer cleared\n");
 }
 
 static ssize_t mouse_read(struct file *file, char __user *user_buffer, size_t len, loff_t *offset) {
@@ -73,6 +86,17 @@ static ssize_t mouse_read(struct file *file, char __user *user_buffer, size_t le
     return bytes_to_copy;
 }
 
+// Handle ioctl commands
+static long mouse_ioctl(struct file *file, unsigned int cmd, unsigned long arg) {
+    switch (cmd) {
+        case MOUSE_LOGGER_CLEAR:
+            clear_buffer();
+            return 0;
+        default:
+            return -ENOTTY; // Unknown command
+    }
+}
+
 // Open function (not much needed here)
 static int mouse_open(struct inode *inode, struct file *file) {
     return 0;
@@ -89,6 +113,7 @@ static struct file_operations fops = {
     .read = mouse_read,
     .open = mouse_open,
     .release = mouse_release,
+    .unlocked_ioctl = mouse_ioctl, // Add ioctl support
 };
 
 // Mouse event callback
