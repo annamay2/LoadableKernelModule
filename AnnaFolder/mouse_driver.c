@@ -7,9 +7,11 @@
 #include <linux/sched.h>  // For wait queues
 #include <linux/wait.h>   // For wait queues
 #include <linux/ioctl.h>  // For ioctl support
+#include <linux/proc_fs.h> // For proc file system support
 
 #define DEVICE_NAME "mouse_logger_1"
 #define BUFFER_SIZE 256
+#define PROC_FILE_NAME "mouse_events"
 
 // Define ioctl command
 #define MOUSE_LOGGER_CLEAR _IO('M', 1)
@@ -27,6 +29,9 @@ static DEFINE_MUTEX(buffer_lock);
 static DECLARE_WAIT_QUEUE_HEAD(mouse_wait_queue);
 static int data_available = 0; // Flag to indicate new data
 
+// Proc file structure
+static struct proc_dir_entry *proc_file;
+
 // Write event to buffer
 static void log_event(const char *event) {
     mutex_lock(&buffer_lock);
@@ -38,8 +43,6 @@ static void log_event(const char *event) {
         printk(KERN_WARNING "Mouse Logger: Buffer full, discarding event: %s\n", event);
     }
     mutex_unlock(&buffer_lock);
-
-    printk(KERN_INFO "Mouse Logger: Logged event - %s\n", event);
 }
 
 // Clear the buffer
@@ -51,6 +54,69 @@ static void clear_buffer(void) {
     printk(KERN_INFO "Mouse Logger: Buffer cleared\n");
 }
 
+// Proc file read operation
+static ssize_t proc_read(struct file *file, char __user *user_buffer, size_t len, loff_t *offset) {
+    mutex_lock(&buffer_lock);
+
+    // Block until data is available
+    while (buffer_pos == 0) {
+        mutex_unlock(&buffer_lock);
+
+        if (file->f_flags & O_NONBLOCK) {
+            return -EAGAIN; // Non-blocking mode, return immediately
+        }
+
+        if (wait_event_interruptible(mouse_wait_queue, data_available)) {
+            return -ERESTARTSYS; // Interrupted by signal
+        }
+
+        mutex_lock(&buffer_lock);
+    }
+
+    // Copy data to user space
+    size_t bytes_to_copy = min(len, (size_t)buffer_pos);
+    if (copy_to_user(user_buffer, event_buffer, bytes_to_copy)) {
+        mutex_unlock(&buffer_lock);
+        return -EFAULT;
+    }
+
+    // Update buffer and offset
+    buffer_pos = 0; // Reset buffer after reading
+    data_available = 0; // Reset data available flag
+    *offset += bytes_to_copy;
+
+    mutex_unlock(&buffer_lock);
+
+    return bytes_to_copy;
+}
+
+// Proc file operations
+static const struct proc_ops proc_fops = {
+    .proc_read = proc_read,
+};
+
+// Handle ioctl commands
+static long mouse_ioctl(struct file *file, unsigned int cmd, unsigned long arg) {
+    switch (cmd) {
+        case MOUSE_LOGGER_CLEAR:
+            clear_buffer();
+            return 0;
+        default:
+            return -ENOTTY; // Unknown command
+    }
+}
+
+// Open function (not much needed here)
+static int mouse_open(struct inode *inode, struct file *file) {
+    return 0;
+}
+
+// Release function
+static int mouse_release(struct inode *inode, struct file *file) {
+    return 0;
+}
+
+// Read function for the character device
 static ssize_t mouse_read(struct file *file, char __user *user_buffer, size_t len, loff_t *offset) {
     mutex_lock(&buffer_lock);
 
@@ -86,31 +152,10 @@ static ssize_t mouse_read(struct file *file, char __user *user_buffer, size_t le
     return bytes_to_copy;
 }
 
-// Handle ioctl commands
-static long mouse_ioctl(struct file *file, unsigned int cmd, unsigned long arg) {
-    switch (cmd) {
-        case MOUSE_LOGGER_CLEAR:
-            clear_buffer();
-            return 0;
-        default:
-            return -ENOTTY; // Unknown command
-    }
-}
-
-// Open function (not much needed here)
-static int mouse_open(struct inode *inode, struct file *file) {
-    return 0;
-}
-
-// Release function
-static int mouse_release(struct inode *inode, struct file *file) {
-    return 0;
-}
-
 // File operations struct
 static struct file_operations fops = {
     .owner = THIS_MODULE,
-    .read = mouse_read,
+    .read = mouse_read, // Use the mouse_read function for the character device
     .open = mouse_open,
     .release = mouse_release,
     .unlocked_ioctl = mouse_ioctl, // Add ioctl support
@@ -118,15 +163,22 @@ static struct file_operations fops = {
 
 // Mouse event callback
 static void mouse_event(struct input_handle *handle, unsigned int type, unsigned int code, int value) {
-    printk(KERN_INFO "Mouse Logger: Received event - type: %u, code: %u, value: %d\n", type, code, value);
+    char event[64];
 
     if (type == EV_KEY && value) {
         if (code == BTN_LEFT) log_event("Left Click");
         else if (code == BTN_RIGHT) log_event("Right Click");
         else if (code == BTN_MIDDLE) log_event("Middle Click");
+    } else if (type == EV_REL) {
+        if (code == REL_X) {
+            snprintf(event, sizeof(event), "Mouse Move: X=%d", value);
+            log_event(event);
+        } else if (code == REL_Y) {
+            snprintf(event, sizeof(event), "Mouse Move: Y=%d", value);
+            log_event(event);
+        }
     }
 }
-
 // Connect function (called when a device is found)
 static int mouse_connect(struct input_handler *handler, struct input_dev *dev, const struct input_device_id *id) {
     struct input_handle *handle;
@@ -212,16 +264,26 @@ static int __init mouse_init(void) {
 
     device_create(mouse_class, NULL, dev, NULL, DEVICE_NAME);
 
+    // Create proc file
+    proc_file = proc_create(PROC_FILE_NAME, 0, NULL, &proc_fops);
+    if (!proc_file) {
+        printk(KERN_ERR "Mouse Logger: Failed to create proc file\n");
+        class_destroy(mouse_class);
+        unregister_chrdev_region(dev, 1);
+        return -ENOMEM;
+    }
+
     printk(KERN_INFO "Mouse Logger: Registering input handler...\n");
 
     if (input_register_handler(&mouse_handler)) {
         printk(KERN_ERR "Mouse Logger: Failed to register input handler\n");
+        proc_remove(proc_file);
         class_destroy(mouse_class);
         unregister_chrdev_region(dev, 1);
         return -EINVAL;
     }
 
-    printk(KERN_INFO "Mouse Logger Loaded. Use: cat /dev/%s\n", DEVICE_NAME);
+    printk(KERN_INFO "Mouse Logger Loaded. Use: cat /proc/%s\n", PROC_FILE_NAME);
     return 0;
 }
 
@@ -231,6 +293,9 @@ static void __exit mouse_exit(void) {
 
     printk(KERN_INFO "Mouse Logger: Unregistering input handler...\n");
     input_unregister_handler(&mouse_handler);
+
+    // Remove proc file
+    proc_remove(proc_file);
 
     device_destroy(mouse_class, dev);
     class_destroy(mouse_class);
@@ -242,7 +307,7 @@ static void __exit mouse_exit(void) {
 
 MODULE_LICENSE("GPL");
 MODULE_AUTHOR("Custom");
-MODULE_DESCRIPTION("Mouse Logger using /dev Interface");
+MODULE_DESCRIPTION("Mouse Logger using /proc Interface");
 
 module_init(mouse_init);
 module_exit(mouse_exit);
