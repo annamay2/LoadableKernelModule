@@ -1,19 +1,19 @@
 #include <stdio.h>
-#include <fcntl.h>      // For open()
-#include <unistd.h>     // For close() and read()
-#include <errno.h>      // For error handling
-#include <sys/ioctl.h>  // For ioctl() system call
-#include <string.h>     // For strstr() and strtok()
+#include <fcntl.h>      
+#include <unistd.h>     
+#include <errno.h>      
+#include <sys/ioctl.h>  
+#include <string.h>     
 
-// Define the device file path corresponding to the mouse logger kernel module
+// locates device file
 #define DEVICE_FILE "/dev/mouse_logger_1"
 
-// Define the ioctl command to clear the event buffer in the kernel module
+// locates ioctl command to clear buffer
 #define MOUSE_LOGGER_CLEAR _IO('M', 1)
 
 int main() {
     char buffer[256];  // Buffer to store read data from the device file
-    int fd = open(DEVICE_FILE, O_RDONLY); // Open the device file in read-only mode
+    int fd = open(DEVICE_FILE, O_RDONLY); // Open the device file in read only mode
 
     // Check if the device file was opened successfully
     if (fd < 0) {
@@ -21,7 +21,7 @@ int main() {
         return 1;
     }
 
-    // Send an ioctl command to clear the buffer before reading new events
+    // use ioctl command to clear the buffer before reading new events
     if (ioctl(fd, MOUSE_LOGGER_CLEAR) < 0) {
         perror("Failed to clear buffer");
         close(fd);
@@ -45,13 +45,13 @@ int main() {
             break;
         }
 
-        // Null-terminate the buffer to ensure it can be treated as a string
         buffer[bytes_read] = '\0';
 
         // Process the buffer line by line using strtok() function
         char *line = buffer;
         while ((line = strtok(line, "\n")) != NULL) {
-            // Check if the line contains a mouse click event ("Click" keyword)
+            // filters mouse inputs to only include clicks in userapp - avoid clogging terminal
+            // All mouse inputs can be seen using cat /proc/mouse_events
             if (strstr(line, "Click") != NULL) {
                 printf("Mouse Event: %s\n", line);
             }

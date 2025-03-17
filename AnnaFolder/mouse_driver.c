@@ -4,87 +4,82 @@
 #include <linux/input.h>
 #include <linux/cdev.h>
 #include <linux/device.h>
-#include <linux/sched.h>  // For wait queues
-#include <linux/wait.h>   // For wait queues
-#include <linux/ioctl.h>  // For ioctl support
-#include <linux/proc_fs.h> // For proc file system support
+#include <linux/sched.h>  
+#include <linux/wait.h>   
+#include <linux/ioctl.h>  
+#include <linux/proc_fs.h> 
 
-// Define constants
+// constants for creating dev and proc files
 #define DEVICE_NAME "mouse_logger_1"
-#define BUFFER_SIZE 256
 #define PROC_FILE_NAME "mouse_events"
 
-// Define ioctl command for clearing the buffer
+// Declaring ioctl command to clear buffer - M is magic number
 #define MOUSE_LOGGER_CLEAR _IO('M', 1)
 
-// Global variables for device registration
+// variables for device registration, used in init function
 static int major_number;
 static struct cdev mouse_cdev;
 static struct class *mouse_class;
 static struct input_handler mouse_handler;
 
-// Buffer for storing mouse events
+// Buffer for mouse events
+#define BUFFER_SIZE 256
 static char event_buffer[BUFFER_SIZE];
 static int buffer_pos = 0;
-static DEFINE_MUTEX(buffer_lock); // Mutex for buffer synchronization
+static DEFINE_MUTEX(buffer_lock); // Mutex makes sure user app doesn't read before driver is done writing
 
-// Wait queue for blocking read operations
+// Wait queue for blocking read operations - process is put to sleep if there is no data
 static DECLARE_WAIT_QUEUE_HEAD(mouse_wait_queue);
-static int data_available = 0; // Flag to indicate new data arrival
+static int data_available = 0; // Flag to indicate there is data to read
 
-// Proc file structure
+// stores location of proc file
 static struct proc_dir_entry *proc_file;
 
 // Function to log mouse events into the buffer
 static void log_event(const char *event) {
-    mutex_lock(&buffer_lock); // Lock to prevent race conditions
+    mutex_lock(&buffer_lock); 
+    int event_len = strlen(event) + 1;  
 
-    int event_len = strlen(event) + 1;  // Include null terminator
-    if (event_len >= BUFFER_SIZE) {
-        printk(KERN_WARNING "Mouse Logger: Event too large, cannot be stored.\n");
-        mutex_unlock(&buffer_lock);
-        return;
-    }
-
-    // If buffer is full, remove oldest entries (FIFO)
+    // FIFO - removes oldest entry when buffer is full (rarely used - buffer is cleared on every read anyways)
     while (buffer_pos + event_len >= BUFFER_SIZE) {
-        // Find the first newline (`\n`) to determine the oldest event
+        // Uses the "\n" character to identify first entry
         char *oldest_event = strchr(event_buffer, '\n');
         if (oldest_event) {
-            int shift_amount = (oldest_event - event_buffer) + 1; // Include newline
+            int shift_amount = (oldest_event - event_buffer) + 1; 
             memmove(event_buffer, oldest_event + 1, BUFFER_SIZE - shift_amount);
             buffer_pos -= shift_amount;
         } else {
-            // If no newline found, just clear buffer
+            // If no newline is found, just clear buffer
             buffer_pos = 0;
         }
     }
 
-    // Now there is space, append new event
+    // Log new event
     buffer_pos += snprintf(event_buffer + buffer_pos, BUFFER_SIZE - buffer_pos, "%s\n", event);
-    data_available = 1; // Signal that data is available
+    data_available = 1; 
 
-    wake_up_interruptible(&mouse_wait_queue); // Wake up reading process
+    // Wakes up waiting read process
+    wake_up_interruptible(&mouse_wait_queue); 
 
-    mutex_unlock(&buffer_lock); // Unlock mutex
+    mutex_unlock(&buffer_lock); 
 }
 
 // Function to clear the event buffer
 static void clear_buffer(void) {
     mutex_lock(&buffer_lock);
     buffer_pos = 0; // Reset buffer position
-    data_available = 0; // Reset data availability flag
+    data_available = 0; 
     mutex_unlock(&buffer_lock);
     printk(KERN_INFO "Mouse Logger: Buffer cleared\n");
 }
 
-// Proc file read operation to provide logged mouse events
+// used by userspace to read from device file (defined in fops)
 static ssize_t proc_read(struct file *file, char __user *user_buffer, size_t len, loff_t *offset) {
     mutex_lock(&buffer_lock);
 
     while (buffer_pos == 0) {
+        // mutex unlocks if there is no data, locks again when process wakes up
         mutex_unlock(&buffer_lock);
-        if (file->f_flags & O_NONBLOCK) return -EAGAIN; // Non-blocking mode
         if (wait_event_interruptible(mouse_wait_queue, data_available)) return -ERESTARTSYS; // Handle interruption
         mutex_lock(&buffer_lock);
     }
@@ -97,19 +92,19 @@ static ssize_t proc_read(struct file *file, char __user *user_buffer, size_t len
     }
 
     buffer_pos = 0;
-    data_available = 0; // Reset data availability flag
+    data_available = 0;
     *offset += bytes_to_copy;
 
     mutex_unlock(&buffer_lock);
     return bytes_to_copy;
 }
 
-// Proc file operations
+// Proc file operations - only read is used (input device)
 static const struct proc_ops proc_fops = {
     .proc_read = proc_read,
 };
 
-// Handle ioctl commands for the device
+// ioctl command to clear the buffer
 static long mouse_ioctl(struct file *file, unsigned int cmd, unsigned long arg) {
     switch (cmd) {
         case MOUSE_LOGGER_CLEAR:
@@ -120,7 +115,7 @@ static long mouse_ioctl(struct file *file, unsigned int cmd, unsigned long arg) 
     }
 }
 
-// Character device operations
+// User space commands (read and ioctl)
 static struct file_operations fops = {
     .owner = THIS_MODULE,
     .read = proc_read, // Use proc_read function for device reads
@@ -186,6 +181,7 @@ static const struct input_device_id mouse_ids[] = {
     { },
 };
 
+// Defines which functions are called depending on the event
 MODULE_DEVICE_TABLE(input, mouse_ids);
 static struct input_handler mouse_handler = {
     .event      = mouse_event,
