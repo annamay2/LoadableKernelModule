@@ -171,7 +171,6 @@ static void mouse_disconnect(struct input_handle *handle) {
     input_close_device(handle);
     input_unregister_handle(handle);
     kfree(handle);
-    printk(KERN_INFO "Mouse Logger: Device Disconnected\n");
 
 }
 
