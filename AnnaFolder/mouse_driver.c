@@ -22,7 +22,6 @@ static int major_number;
 static struct cdev mouse_cdev;
 static struct class *mouse_class;
 static struct input_handler mouse_handler;
-static struct input_dev *input_device;
 
 // Buffer for storing mouse events
 static char event_buffer[BUFFER_SIZE];
@@ -38,15 +37,36 @@ static struct proc_dir_entry *proc_file;
 
 // Function to log mouse events into the buffer
 static void log_event(const char *event) {
-    mutex_lock(&buffer_lock);
-    if (buffer_pos + strlen(event) + 2 < BUFFER_SIZE) { // Ensure buffer does not overflow
-        buffer_pos += snprintf(event_buffer + buffer_pos, BUFFER_SIZE - buffer_pos, "%s\n", event);
-        data_available = 1; // Set flag to indicate new data availability
-        wake_up_interruptible(&mouse_wait_queue); // Wake up any waiting processes
-    } else {
-        printk(KERN_WARNING "Mouse Logger: Buffer full, discarding event: %s\n", event);
+    mutex_lock(&buffer_lock); // Lock to prevent race conditions
+
+    int event_len = strlen(event) + 1;  // Include null terminator
+    if (event_len >= BUFFER_SIZE) {
+        printk(KERN_WARNING "Mouse Logger: Event too large, cannot be stored.\n");
+        mutex_unlock(&buffer_lock);
+        return;
     }
-    mutex_unlock(&buffer_lock);
+
+    // If buffer is full, remove oldest entries (FIFO)
+    while (buffer_pos + event_len >= BUFFER_SIZE) {
+        // Find the first newline (`\n`) to determine the oldest event
+        char *oldest_event = strchr(event_buffer, '\n');
+        if (oldest_event) {
+            int shift_amount = (oldest_event - event_buffer) + 1; // Include newline
+            memmove(event_buffer, oldest_event + 1, BUFFER_SIZE - shift_amount);
+            buffer_pos -= shift_amount;
+        } else {
+            // If no newline found, just clear buffer
+            buffer_pos = 0;
+        }
+    }
+
+    // Now there is space, append new event
+    buffer_pos += snprintf(event_buffer + buffer_pos, BUFFER_SIZE - buffer_pos, "%s\n", event);
+    data_available = 1; // Signal that data is available
+
+    wake_up_interruptible(&mouse_wait_queue); // Wake up reading process
+
+    mutex_unlock(&buffer_lock); // Unlock mutex
 }
 
 // Function to clear the event buffer
@@ -76,7 +96,7 @@ static ssize_t proc_read(struct file *file, char __user *user_buffer, size_t len
         return -EFAULT;
     }
 
-    buffer_pos = 0; // Clear buffer after reading
+    buffer_pos = 0;
     data_available = 0; // Reset data availability flag
     *offset += bytes_to_copy;
 
@@ -156,6 +176,8 @@ static void mouse_disconnect(struct input_handle *handle) {
     input_close_device(handle);
     input_unregister_handle(handle);
     kfree(handle);
+    printk(KERN_INFO "Mouse Logger: Device Disconnected\n");
+
 }
 
 // Input device registration
